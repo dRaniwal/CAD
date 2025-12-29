@@ -3,68 +3,43 @@ import cv2
 
 # ================= BASIC CROWD PHYSICS =================
 
-def velocity_variance(flow):
+def velocity_energy(flow, magnitude_threshold=0.5): # CHANGED: Lowered from 2.0 to 0.5
+    """
+    Returns the raw kinetic energy. 
+    Threshold lowered to 0.5 to detect slower/distant crowds.
+    """
     mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-    return float(np.var(mag))
+    mag[mag < magnitude_threshold] = 0
+    return float(np.mean(mag))
 
+def directional_entropy(flow, bins=16, magnitude_threshold=0.5): # CHANGED: Lowered from 2.0
+    mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+    valid_indices = mag > magnitude_threshold
+    
+    if not np.any(valid_indices):
+        return 0.0
 
-def directional_entropy(flow, bins=16):
-    _, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-    ang = ang.flatten()
-
+    ang = ang[valid_indices].flatten()
     bin_edges = np.linspace(0, 2 * np.pi, bins + 1)
     hist, _ = np.histogram(ang, bins=bin_edges)
-
     hist = hist / (hist.sum() + 1e-8)
     return float(-np.sum(hist * np.log(hist + 1e-8)))
 
+# ================= IMPROVED ESCALATION =================
 
-def density_rate(current, prev=[0]):
-    rate = current - prev[0]
-    prev[0] = current
-    return float(rate)
-
-# ================= FINAL ESCALATION FORMULATION (CONTRAST-BASED) =================
-
-def escalation_contrast(
-    local_scores,
-    alpha=0.2,      # weight for variance term
-    beta=0.8,       # weight for max/mean term
-    eps=1e-6
-):
-    """
-    Escalation risk based on SPATIAL CONTRAST of local instability.
-
-    local_scores: list of local instability energies e_i >= 0
-
-    Idea:
-    - Stable crowd -> all e_i similar -> low variance -> low risk
-    - Local outbreak -> one e_i >> others -> high contrast -> high risk
-    """
-
+def hybrid_escalation_score(local_scores):
     e = np.asarray(local_scores, dtype=np.float32)
-
-    if e.size == 0:
-        return 0.0
+    if e.size == 0: return 0.0
 
     mean_e = np.mean(e)
     var_e = np.var(e)
+    max_e = np.max(e)
 
-    # --- contrast terms ---
-    variance_term = var_e / (mean_e + eps)
-    maxmean_term = (np.max(e) - mean_e) / (mean_e + eps)
+    # RE-BALANCED:
+    # If the variance is high (fighting), boost score significantly.
+    score = (0.5 * max_e) + (0.3 * mean_e) + (0.2 * var_e)
+    return float(score)
 
-    # --- combined contrast energy ---
-    contrast_energy = alpha * variance_term + beta * maxmean_term
-
-    return float(contrast_energy)
-
-
-def squash_escalation(x, tau=0.5, gamma=6.0):
-    """
-    Map contrast energy to [0,1] escalation risk.
-
-    tau   : stability threshold
-    gamma : sharpness of transition
-    """
+def squash_escalation(x, tau=0.3, gamma=5.0): # CHANGED: Lowered tau from 0.5 to 0.3
+    # This makes the score turn "Red" much easier/earlier
     return float(1.0 / (1.0 + np.exp(-gamma * (x - tau))))
